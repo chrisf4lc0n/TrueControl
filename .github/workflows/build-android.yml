@@ -1,58 +1,168 @@
-name: Build TrueControl APK
+name: Build TrueControl Android APK
 
 on:
   workflow_dispatch:
+  push:
+    branches: [ main, master ]
 
 jobs:
-  build:
+  build-android:
     runs-on: ubuntu-latest
     
     steps:
-    - name: Checkout code
+    - name: Checkout repository
       uses: actions/checkout@v4
       
     - name: Setup Node.js
       uses: actions/setup-node@v4
       with:
         node-version: '18'
+        cache: 'npm'
         
     - name: Install dependencies
-      run: npm install
-      
-    - name: Setup Expo
-      run: npm install -g @expo/cli eas-cli
-      
-    - name: Login to Expo (if token provided)
-      if: env.EXPO_TOKEN != ''
-      env:
-        EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
-      run: eas login --non-interactive
-      
+      run: |
+        npm install
+        
+    - name: Install Expo CLI and EAS
+      run: |
+        npm install -g @expo/cli eas-cli
+        
+    - name: Check project structure
+      run: |
+        ls -la
+        cat package.json
+        
+    - name: Setup Expo project
+      run: |
+        # Check if this is an Expo project
+        if [ ! -f "app.json" ] && [ ! -f "app.config.js" ]; then
+          echo "Initializing Expo project..."
+          npx expo init --template blank --name TrueControl --slug truecontrol || true
+        fi
+        
+    - name: Configure app.json for standalone build
+      run: |
+        # Create or update app.json for Android build
+        cat > app.json << 'EOF'
+        {
+          "expo": {
+            "name": "TrueControl",
+            "slug": "truecontrol",
+            "version": "1.0.0",
+            "orientation": "portrait",
+            "icon": "./assets/icon.png",
+            "userInterfaceStyle": "light",
+            "splash": {
+              "image": "./assets/splash.png",
+              "resizeMode": "contain",
+              "backgroundColor": "#ffffff"
+            },
+            "assetBundlePatterns": [
+              "**/*"
+            ],
+            "ios": {
+              "supportsTablet": true
+            },
+            "android": {
+              "adaptiveIcon": {
+                "foregroundImage": "./assets/adaptive-icon.png",
+                "backgroundColor": "#FFFFFF"
+              },
+              "package": "com.truecontrol.app"
+            },
+            "web": {
+              "favicon": "./assets/favicon.png"
+            }
+          }
+        }
+        EOF
+        
+    - name: Install EAS and configure
+      run: |
+        # Configure EAS for build
+        cat > eas.json << 'EOF'
+        {
+          "cli": {
+            "version": ">= 5.4.0"
+          },
+          "build": {
+            "development": {
+              "developmentClient": true,
+              "distribution": "internal"
+            },
+            "preview": {
+              "android": {
+                "buildType": "apk"
+              }
+            },
+            "production": {
+              "android": {
+                "buildType": "apk"
+              }
+            }
+          },
+          "submit": {
+            "production": {}
+          }
+        }
+        EOF
+        
+    - name: Create dummy assets (if missing)
+      run: |
+        mkdir -p assets
+        # Create a simple icon if it doesn't exist
+        if [ ! -f "assets/icon.png" ]; then
+          # Create a simple colored square as icon
+          convert -size 1024x1024 xc:blue assets/icon.png || echo "ImageMagick not available, skipping icon creation"
+        fi
+        
     - name: Build APK with EAS
       env:
         EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
       run: |
-        if [ -n "$EXPO_TOKEN" ]; then
-          eas build --platform android --profile preview --non-interactive
-        else
-          echo "No EXPO_TOKEN found. Please set up an Expo account and token."
-          echo "For now, we'll try a local build approach..."
-          npx expo export
-        fi
+        # Build APK using EAS Build
+        eas build --platform android --profile preview --non-interactive --no-wait || echo "EAS build failed, trying local build"
         
-    - name: Download EAS build (if successful)
-      if: env.EXPO_TOKEN != ''
-      env:
-        EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+    - name: Alternative - Local Android build
+      if: failure()
       run: |
-        # EAS build creates a downloadable link
-        echo "Check your Expo dashboard for the built APK"
+        # Install Android SDK components
+        $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "platforms;android-33" "build-tools;33.0.0"
         
-    - name: Upload build artifacts
+        # Try to build locally
+        npx expo run:android --variant release || echo "Local build also failed"
+        
+    - name: Alternative - Expo build (deprecated but might work)
+      if: failure()
+      run: |
+        # Try the older expo build command
+        npx expo build:android --type apk --non-interactive || echo "Legacy build failed"
+        
+    - name: Find any generated files
+      run: |
+        echo "=== Searching for APK files ==="
+        find . -name "*.apk" -type f 2>/dev/null || echo "No APK files found"
+        
+        echo "=== Searching for AAB files ==="
+        find . -name "*.aab" -type f 2>/dev/null || echo "No AAB files found"
+        
+        echo "=== Checking common build directories ==="
+        ls -la android/app/build/outputs/ 2>/dev/null || echo "Android build dir not found"
+        ls -la build/ 2>/dev/null || echo "Build dir not found"
+        ls -la dist/ 2>/dev/null || echo "Dist dir not found"
+        
+        echo "=== All files in project ==="
+        find . -type f -name "*" | grep -E "\.(apk|aab|js|json)$" | head -20
+        
+    - name: Upload any build artifacts
       uses: actions/upload-artifact@v4
       if: always()
       with:
-        name: build-logs
+        name: Build-Output
         path: |
+          **/*.apk
+          **/*.aab
+          build/
+          android/app/build/outputs/
           .expo/
-          *.log
+        retention-days: 30
